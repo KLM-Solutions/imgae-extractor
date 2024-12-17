@@ -328,6 +328,20 @@ You are converting the video transcript into a concise blog post in the speaker'
 12. Reference images using [IMAGE_X] tags where appropriate, describing what each image shows.
 """
 
+def clean_image_descriptions(text):
+    """Convert image description tags into proper markdown"""
+    # Pattern to match [IMAGE_X: description] format
+    image_pattern = r'\[IMAGE_(\d+):\s*(.*?)\]'
+    
+    def replace_image(match):
+        image_num = match.group(1)
+        description = match.group(2)
+        return f'*[Image {image_num}: {description}]*'
+    
+    # Replace image tags with markdown formatted text
+    cleaned_text = re.sub(image_pattern, replace_image, text)
+    return cleaned_text
+
 def generate_article_from_transcript(title, transcript, video_details=None, style="detailed", frames=None):
     """Generate a blog post with images from the transcript and video details"""
     if client is None:
@@ -351,7 +365,6 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
         frame_times = [f"Frame {i+1} at {frame['time_str']}" for i, frame in enumerate(frames)]
         frame_context = f"\nAvailable video frames: {', '.join(frame_times)}"
     
-    # Generate blog content
     content_prompt = f"""Write a {'detailed' if style == 'detailed' else 'concise'} blog post with the title: '{title}'
     
     Context: {context}
@@ -362,10 +375,9 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
     Convert this into a well-structured blog post while maintaining the speaker's voice and key insights.
     Make it {'comprehensive and detailed' if style == 'detailed' else 'concise and focused'}.
     
-    If there are video frames available, suggest good places to insert them using [IMAGE_X] tags,
-    where X is the frame number (1 to {len(frames) if frames else 0}).
-    
-    Use proper markdown formatting and create an engaging article."""
+    When mentioning images, use the format [IMAGE_X: description] where X is the frame number and description 
+    explains what the image shows.
+    """
     
     try:
         response = client.chat.completions.create(
@@ -374,24 +386,26 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": content_prompt}
             ],
-            temperature=0.1
+            temperature=0.7
         )
         
         article_content = response.choices[0].message.content
         
-        # If we have frames, replace the image tags with actual images
+        # Clean up the image descriptions
+        article_content = clean_image_descriptions(article_content)
+        
+        # If we have frames, add them after their descriptions
         if frames:
             for i, frame in enumerate(frames, 1):
-                img_tag = f'[IMAGE_{i}]'
-                img_html = f'<img src="data:image/jpeg;base64,{frame["image"]}" alt="Frame at {frame["time_str"]}" style="max-width: 100%; height: auto; margin: 20px 0;">'
-                article_content = article_content.replace(img_tag, img_html)
+                img_pattern = f'*[Image {i}:'
+                img_html = f'\n\n<img src="data:image/jpeg;base64,{frame["image"]}" alt="Frame at {frame["time_str"]}" style="max-width: 100%; height: auto; margin: 20px 0;">\n\n'
+                article_content = article_content.replace(img_pattern, img_html + img_pattern)
         
         return article_content
         
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return None
-
 def main():
     st.set_page_config(page_title="YouTube to Blog Post Generator", page_icon="📝", layout="wide")
     
