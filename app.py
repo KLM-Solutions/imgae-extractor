@@ -1,4 +1,3 @@
-
 import streamlit as st
 from openai import OpenAI
 from googleapiclient.discovery import build
@@ -69,14 +68,14 @@ def extract_video_id(url):
     return None
 
 def extract_frames_method1(video_url, num_frames=5):
-    """Extract frames using pytube and opencv with debug logging"""
+    """Extract frames using pytube and opencv"""
     try:
         # Create a temporary directory
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Add debug logging
-            st.info(f"Starting frame extraction for {num_frames} frames...")
-            
+            # Download video
             yt = YouTube(video_url)
+            
+            # Get the highest quality stream that includes both video and audio
             stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
             
             if not stream:
@@ -88,69 +87,50 @@ def extract_frames_method1(video_url, num_frames=5):
             
             # Open video file
             cap = cv2.VideoCapture(temp_video_path)
-            if not cap.isOpened():
-                raise Exception("Failed to open video file")
             
             # Get video properties
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
+            duration = total_frames / fps
             
-            st.info(f"Video loaded: {total_frames} total frames at {fps} FPS")
-            
-            # Calculate frame intervals
+            # Calculate frame intervals for even distribution
             interval = total_frames // (num_frames + 1)
             frames = []
             
             for i in range(num_frames):
+                # Calculate position for evenly distributed frames
                 frame_pos = interval * (i + 1)
-                st.info(f"Processing frame {i+1} at position {frame_pos}")
-                
-                # Set frame position
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
                 ret, frame = cap.read()
                 
-                if not ret:
-                    st.warning(f"Failed to read frame {i+1}")
-                    continue
-                
-                # Process frame
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                
-                # Resize maintaining aspect ratio
-                width, height = pil_image.size
-                aspect_ratio = width / height
-                new_width = 800
-                new_height = int(new_width / aspect_ratio)
-                pil_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                
-                # Convert to base64
-                buffered = BytesIO()
-                pil_image.save(buffered, format="JPEG", quality=85)
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                
-                # Verify base64 string
-                if not img_str:
-                    st.warning(f"Failed to encode frame {i+1}")
-                    continue
-                
-                # Calculate timestamp
-                timestamp = frame_pos / fps
-                time_str = datetime.utcfromtimestamp(timestamp).strftime('%M:%S')
-                
-                frames.append({
-                    'image': img_str,
-                    'timestamp': timestamp,
-                    'time_str': time_str
-                })
-                
-                st.info(f"Successfully processed frame {i+1}")
+                if ret:
+                    # Convert to RGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Create PIL Image
+                    pil_image = Image.fromarray(frame_rgb)
+                    # Resize maintaining aspect ratio
+                    pil_image.thumbnail((800, 450))
+                    
+                    # Convert to base64
+                    buffered = BytesIO()
+                    pil_image.save(buffered, format="JPEG", quality=85)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    
+                    # Convert time to timestamp
+                    timestamp = frame_pos / fps
+                    time_str = str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
+                    
+                    frames.append({
+                        'image': img_str,
+                        'timestamp': timestamp,
+                        'time_str': time_str
+                    })
             
             cap.release()
             return frames
             
     except Exception as e:
-        st.error(f"Frame extraction failed: {str(e)}")
+        st.error(f"Method 1 failed: {str(e)}")
         return None
 
 def extract_video_thumbnails(video_url):
@@ -348,49 +328,18 @@ You are converting the video transcript into a concise blog post in the speaker'
 12. Reference images using [IMAGE_X] tags where appropriate, describing what each image shows.
 """
 
-def clean_image_descriptions(text, frames):
-    """Convert image description tags into proper markdown with debug logging"""
-    if not frames:
-        st.warning("No frames provided for image insertion")
-        return text
-    
-    st.info(f"Processing {len(frames)} frames for insertion")
-    
+def clean_image_descriptions(text):
+    """Convert image description tags into proper markdown"""
     # Pattern to match [IMAGE_X: description] format
     image_pattern = r'\[IMAGE_(\d+):\s*(.*?)\]'
     
     def replace_image(match):
-        image_num = int(match.group(1))
+        image_num = match.group(1)
         description = match.group(2)
-        
-        # Debug logging
-        st.info(f"Processing image {image_num} with description: {description}")
-        
-        # Verify frame index
-        if 0 < image_num <= len(frames):
-            frame = frames[image_num - 1]
-            
-            # Verify we have image data
-            if not frame.get('image'):
-                st.warning(f"No image data for frame {image_num}")
-                return f'*[Image {image_num}: {description}]*'
-            
-            img_html = f'''
-            <div style="margin: 20px 0;">
-                <img src="data:image/jpeg;base64,{frame['image']}" 
-                     alt="{description}" 
-                     style="max-width: 100%; height: auto; display: block; margin: 10px 0;">
-                <em>Image {image_num} ({frame['time_str']}): {description}</em>
-            </div>
-            '''
-            return img_html
-        else:
-            st.warning(f"Image number {image_num} is out of range (have {len(frames)} frames)")
-            return f'*[Image {image_num}: {description}]*'
+        return f'*[Image {image_num}: {description}]*'
     
-    # Replace image tags with actual images and descriptions
+    # Replace image tags with markdown formatted text
     cleaned_text = re.sub(image_pattern, replace_image, text)
-    
     return cleaned_text
 
 def generate_article_from_transcript(title, transcript, video_details=None, style="detailed", frames=None):
@@ -399,42 +348,58 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
         st.error("OpenAI client not initialized. Cannot generate article.")
         return None
         
-    # Add debug logging for frames
-    if frames:
-        st.info(f"Received {len(frames)} frames for article generation")
-    else:
-        st.warning("No frames available for article generation")
-    
     # Select appropriate system instruction based on style
     system_instruction = SYSTEM_INSTRUCTION_DETAILED if style == "detailed" else SYSTEM_INSTRUCTION_CONCISE
     
-    # Create prompt with frame information
+    # Create a context-rich prompt using video details if available
+    context = ""
+    if video_details:
+        context = f"""
+        Video Title: {video_details['title']}
+        Video Description: {video_details['description']}
+        """
+    
+    # Add frame information to the prompt if available
     frame_context = ""
     if frames:
         frame_times = [f"Frame {i+1} at {frame['time_str']}" for i, frame in enumerate(frames)]
         frame_context = f"\nAvailable video frames: {', '.join(frame_times)}"
     
+    content_prompt = f"""Write a {'detailed' if style == 'detailed' else 'concise'} blog post with the title: '{title}'
+    
+    Context: {context}
+    {frame_context}
+    
+    Full transcript: {transcript}
+    
+    Convert this into a well-structured blog post while maintaining the speaker's voice and key insights.
+    Make it {'comprehensive and detailed' if style == 'detailed' else 'concise and focused'}.
+    
+    When mentioning images, use the format [IMAGE_X: description] where X is the frame number and description 
+    explains what the image shows.
+    """
+    
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-2024-11-20",  # Updated to latest model
+            model="gpt-4o-2024-11-20gpt-4o-2024-11-20",
             messages=[
                 {"role": "system", "content": system_instruction},
-                {"role": "user", "content": f"""Write a {'detailed' if style == 'detailed' else 'concise'} blog post with the title: '{title}'
-                
-                Available frames: {frame_context}
-                
-                Full transcript: {transcript}
-                
-                When referencing images, use [IMAGE_X: description] format where X is the frame number (1 to {len(frames) if frames else 0}).
-                """}
+                {"role": "user", "content": content_prompt}
             ],
             temperature=0.7
         )
         
         article_content = response.choices[0].message.content
         
-        # Process and insert images
-        article_content = clean_image_descriptions(article_content, frames)
+        # Clean up the image descriptions
+        article_content = clean_image_descriptions(article_content)
+        
+        # If we have frames, add them after their descriptions
+        if frames:
+            for i, frame in enumerate(frames, 1):
+                img_pattern = f'*[Image {i}:'
+                img_html = f'\n\n<img src="data:image/jpeg;base64,{frame["image"]}" alt="Frame at {frame["time_str"]}" style="max-width: 100%; height: auto; margin: 20px 0;">\n\n'
+                article_content = article_content.replace(img_pattern, img_html + img_pattern)
         
         return article_content
         
