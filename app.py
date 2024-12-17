@@ -69,69 +69,89 @@ def extract_video_id(url):
     return None
 
 def extract_frames_method1(video_url, num_frames=5):
-    """Extract frames using pytube and opencv"""
+    """Extract frames using pytube and opencv with improved error handling and frame selection"""
     try:
         # Create a temporary directory
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Download video
-            yt = YouTube(video_url)
+            # Download video with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    yt = YouTube(video_url)
+                    stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                    
+                    if not stream:
+                        raise Exception("No suitable video stream found")
+                    
+                    temp_video_path = os.path.join(temp_dir, 'temp_video.mp4')
+                    stream.download(output_path=temp_dir, filename='temp_video.mp4')
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise e
+                    time.sleep(2 ** attempt)
             
-            # Get the highest quality stream that includes both video and audio
-            stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-            
-            if not stream:
-                raise Exception("No suitable video stream found")
-            
-            # Download to temporary directory
-            temp_video_path = os.path.join(temp_dir, 'temp_video.mp4')
-            stream.download(output_path=temp_dir, filename='temp_video.mp4')
-            
-            # Open video file
+            # Open video file with error checking
             cap = cv2.VideoCapture(temp_video_path)
+            if not cap.isOpened():
+                raise Exception("Failed to open video file")
             
             # Get video properties
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
-            duration = total_frames / fps
             
-            # Calculate frame intervals for even distribution
+            # Ensure we have enough frames
+            if total_frames < num_frames:
+                raise Exception(f"Video has fewer frames ({total_frames}) than requested ({num_frames})")
+            
+            # Calculate frame intervals
             interval = total_frames // (num_frames + 1)
             frames = []
             
             for i in range(num_frames):
-                # Calculate position for evenly distributed frames
                 frame_pos = interval * (i + 1)
+                
+                # Set frame position with verification
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
                 ret, frame = cap.read()
                 
-                if ret:
-                    # Convert to RGB
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    # Create PIL Image
-                    pil_image = Image.fromarray(frame_rgb)
-                    # Resize maintaining aspect ratio
-                    pil_image.thumbnail((800, 450))
-                    
-                    # Convert to base64
-                    buffered = BytesIO()
-                    pil_image.save(buffered, format="JPEG", quality=85)
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
-                    
-                    # Convert time to timestamp
-                    timestamp = frame_pos / fps
-                    time_str = str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
-                    
-                    frames.append({
-                        'image': img_str,
-                        'timestamp': timestamp,
-                        'time_str': time_str
-                    })
+                if not ret:
+                    st.warning(f"Failed to read frame at position {frame_pos}")
+                    continue
+                
+                # Process frame
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(frame_rgb)
+                
+                # Resize while maintaining aspect ratio
+                max_size = (800, 450)
+                pil_image.thumbnail(max_size, Image.Resampling.LANCZOS)
+                
+                # Convert to base64 with improved quality
+                buffered = BytesIO()
+                pil_image.save(buffered, format="JPEG", quality=85, optimize=True)
+                img_str = base64.b64encode(buffered.getvalue()).decode()
+                
+                # Calculate timestamp
+                timestamp = frame_pos / fps
+                time_str = datetime.utcfromtimestamp(timestamp).strftime('%M:%S')
+                
+                frames.append({
+                    'image': img_str,
+                    'timestamp': timestamp,
+                    'time_str': time_str
+                })
             
             cap.release()
+            
+            # Verify we got the expected number of frames
+            if not frames:
+                raise Exception("No frames were extracted")
+            
             return frames
             
     except Exception as e:
-        st.error(f"Method 1 failed: {str(e)}")
+        st.error(f"Frame extraction failed: {str(e)}")
         return None
 
 def extract_video_thumbnails(video_url):
@@ -329,17 +349,27 @@ You are converting the video transcript into a concise blog post in the speaker'
 12. Reference images using [IMAGE_X] tags where appropriate, describing what each image shows.
 """
 
-def clean_image_descriptions(text):
-    """Convert image description tags into proper markdown"""
-    # Pattern to match [IMAGE_X: description] format
+def clean_image_descriptions(text, frames):
+    """Convert image description tags into proper markdown with actual images"""
+    if not frames:
+        return text
+        
+    # First, convert all image tags to a temporary format to avoid conflicts
     image_pattern = r'\[IMAGE_(\d+):\s*(.*?)\]'
     
     def replace_image(match):
-        image_num = match.group(1)
+        image_num = int(match.group(1))
         description = match.group(2)
-        return f'*[Image {image_num}: {description}]*'
+        
+        # Check if we have this frame
+        if 0 < image_num <= len(frames):
+            frame = frames[image_num - 1]
+            img_html = f'\n\n<img src="data:image/jpeg;base64,{frame["image"]}" alt="{description}" style="max-width: 100%; height: auto; margin: 20px 0;">\n\n'
+            return f'{img_html}*[Image {image_num}: {description}]*'
+        else:
+            return f'*[Image {image_num}: {description}]*'
     
-    # Replace image tags with markdown formatted text
+    # Replace all image tags with actual images and formatted descriptions
     cleaned_text = re.sub(image_pattern, replace_image, text)
     return cleaned_text
 
@@ -393,7 +423,7 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
         article_content = response.choices[0].message.content
         
         # Clean up the image descriptions
-        article_content = clean_image_descriptions(article_content)
+        article_content = clean_image_descriptions(article_content, frames)
         
         # If we have frames, add them after their descriptions
         if frames:
