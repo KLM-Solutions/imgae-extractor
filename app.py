@@ -38,8 +38,6 @@ def init_openai_client():
 client = init_openai_client()
 
 
-# Initialize the YouTube client
-youtube = init_youtube_client()
 
 def extract_video_id(url):
     """Extract YouTube video ID from URL"""
