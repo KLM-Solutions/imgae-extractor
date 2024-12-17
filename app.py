@@ -16,7 +16,7 @@ import base64
 from datetime import datetime
 import tempfile
 import requests
-import yt_dlp
+
 
 # Load environment variables
 load_dotenv()
@@ -133,61 +133,6 @@ def extract_frames_method1(video_url, num_frames=5):
         st.error(f"Method 1 failed: {str(e)}")
         return None
 
-def extract_frames_method2(video_url, num_frames=5):
-    """Extract frames using yt-dlp and opencv"""
-    try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Configure yt-dlp options
-            ydl_opts = {
-                'format': 'best[ext=mp4]',
-                'outtmpl': os.path.join(temp_dir, 'video.mp4'),
-            }
-            
-            # Download video using yt-dlp
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-                
-            video_path = os.path.join(temp_dir, 'video.mp4')
-            
-            # Process video with OpenCV
-            cap = cv2.VideoCapture(video_path)
-            frames = []
-            
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            
-            interval = total_frames // (num_frames + 1)
-            
-            for i in range(num_frames):
-                frame_pos = interval * (i + 1)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-                ret, frame = cap.read()
-                
-                if ret:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_image = Image.fromarray(frame_rgb)
-                    pil_image.thumbnail((800, 450))
-                    
-                    # Convert to base64
-                    buffered = BytesIO()
-                    pil_image.save(buffered, format="JPEG", quality=85)
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
-                    
-                    timestamp = frame_pos / fps
-                    time_str = str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
-                    
-                    frames.append({
-                        'image': img_str,
-                        'timestamp': timestamp,
-                        'time_str': time_str
-                    })
-            
-            cap.release()
-            return frames
-            
-    except Exception as e:
-        st.error(f"Method 2 failed: {str(e)}")
-        return None
 def extract_video_thumbnails(video_url):
     """Extract video thumbnails as fallback"""
     try:
@@ -233,12 +178,7 @@ def get_video_frames(video_url, num_frames=5):
     # Try Method 1 (pytube + opencv)
     frames = extract_frames_method1(video_url, num_frames)
     if frames:
-        return frames, "Method 1 (pytube)"
-        
-    # Try Method 2 (yt-dlp + opencv)
-    frames = extract_frames_method2(video_url, num_frames)
-    if frames:
-        return frames, "Method 2 (yt-dlp)"
+        return frames, "pytube"
         
     # Fallback to thumbnails
     frames = extract_video_thumbnails(video_url)
