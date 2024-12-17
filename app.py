@@ -416,7 +416,7 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4-1106-preview",  # Updated to latest model
+            model="gpt-4o-2024-11-20",  # Updated to latest model
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": f"""Write a {'detailed' if style == 'detailed' else 'concise'} blog post with the title: '{title}'
