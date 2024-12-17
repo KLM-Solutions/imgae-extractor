@@ -37,18 +37,6 @@ def init_openai_client():
 # Initialize the OpenAI client
 client = init_openai_client()
 
-# Set up YouTube API client with error handling
-def init_youtube_client():
-    """Initialize YouTube API client with proper error handling"""
-    try:
-        api_key = st.secrets["YOUTUBE_API_KEY"]
-        if not api_key:
-            raise ValueError("YouTube API key not found in secrets")
-        return build('youtube', 'v3', developerKey=api_key)
-    except Exception as e:
-        st.error("Error initializing YouTube client. Please check your API key in Streamlit secrets.")
-        st.error(f"Error details: {str(e)}")
-        return None
 
 # Initialize the YouTube client
 youtube = init_youtube_client()
@@ -188,7 +176,7 @@ def get_video_frames(video_url, num_frames=5):
     return None, "Failed"
 
 def get_video_transcript(video_id):
-    """Get transcript from YouTube video with fallback to audio transcription"""
+    """Get transcript from YouTube video with better error handling"""
     try:
         # First try getting transcript through YouTube API
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -197,36 +185,42 @@ def get_video_transcript(video_id):
         try:
             transcript = transcript_list.find_transcript(['en'])
         except:
-            # If no English transcript, get the first available and translate it
-            transcript = transcript_list.find_transcript(['en'])
-            transcript = transcript.translate('en')
+            # If no English transcript, try to get any transcript and translate it
+            try:
+                available_transcripts = transcript_list.find_generated_transcript()
+                if available_transcripts:
+                    transcript = available_transcripts.translate('en')
+                else:
+                    raise Exception("No transcripts available")
+            except:
+                st.warning("No automatic captions available. Attempting manual transcription...")
+                return transcribe_audio(video_id)
         
         transcript_text = ' '.join([item['text'] for item in transcript.fetch()])
         return transcript_text
         
     except Exception as e:
-        st.info("No transcript available. Attempting to transcribe audio...")
-        # Try the fallback method with additional error context
-        transcript = transcribe_audio(video_id)
-        if not transcript:
-            st.error("""
-            Unable to process video. This could be due to:
-            - Video is private or restricted
-            - No available transcripts
-            - Audio transcription failed
-            
-            Please try another video or ensure the video is public.
-            """)
-        return transcript
+        if "Video is private" in str(e):
+            st.error("This video is private. Please try a public video.")
+            return None
+        elif "Video unavailable" in str(e):
+            st.error("This video is unavailable. It might be deleted or restricted.")
+            return None
+        else:
+            st.info("No transcript available. Attempting to transcribe audio...")
+            return transcribe_audio(video_id)
 
 def transcribe_audio(video_id):
-    """Download and transcribe video audio using Whisper"""
+    """Download and transcribe video audio with improved error handling"""
     try:
         # Get video URL
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         
-        # Configure pytube with custom parameters
+        # Configure pytube with custom parameters and authentication
         yt = YouTube(video_url)
+        
+        # Add user agent to avoid 403 error
+        yt.bypass_age_gate()
         
         # Add retry logic for audio download
         max_retries = 3
@@ -238,39 +232,92 @@ def transcribe_audio(video_id):
                 if not audio_stream:
                     raise Exception("No audio stream available")
                 
-                # Use a unique temporary filename
-                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
-                    temp_path = temp_file.name
+                # Create temp directory
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_file = os.path.join(temp_dir, f'temp_audio_{video_id}.mp4')
                     
-                # Download with timeout
-                audio_stream.download(filename=temp_path, timeout=30)
-                
-                # Check if file exists and has size
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                    raise Exception("Download failed or empty file")
-                
-                # Load Whisper model and transcribe
-                model = whisper.load_model("base")
-                result = model.transcribe(temp_path)
-                
-                # Clean up
-                os.unlink(temp_path)
-                return result["text"]
+                    # Download with timeout
+                    audio_stream.download(filename=temp_file, timeout=30)
+                    
+                    # Check if file exists and has size
+                    if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
+                        raise Exception("Download failed or empty file")
+                    
+                    # Load Whisper model and transcribe
+                    model = whisper.load_model("base")
+                    result = model.transcribe(temp_file)
+                    
+                    return result["text"]
                 
             except Exception as e:
-                if attempt == max_retries - 1:
+                if "HTTP Error 403" in str(e):
+                    st.error("Access to this video is restricted. Please try another video.")
+                    return None
+                elif attempt == max_retries - 1:
                     raise e
                 time.sleep(2 ** attempt)  # Exponential backoff
                 continue
                 
     except Exception as e:
-        st.error(f"Error transcribing audio: {str(e)}")
+        st.error(f"Error accessing video: {str(e)}")
+        st.error("""
+        Unable to process this video. This could be due to:
+        - Video is private or restricted
+        - Age-restricted content
+        - Region-restricted content
+        - Copyright restrictions
+        
+        Please try another public video.
+        """)
         return None
-    finally:
-        # Ensure cleanup even if error occurs
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.unlink(temp_path)
 
+def init_youtube_client():
+    """Initialize YouTube API client with improved authentication"""
+    try:
+        api_key = st.secrets["YOUTUBE_API_KEY"]
+        if not api_key:
+            raise ValueError("YouTube API key not found in secrets")
+            
+        # Add retry mechanism for API client
+        from googleapiclient.http import HttpRequest
+        HttpRequest.MAX_RETRIES = 3
+        
+        return build('youtube', 'v3', 
+                    developerKey=api_key,
+                    cache_discovery=False)
+    except Exception as e:
+        st.error("Error initializing YouTube client. Please check your API key.")
+        st.error(f"Error details: {str(e)}")
+        return None
+
+# Update the main function to include video accessibility check
+def check_video_accessibility(video_id):
+    """Check if video is accessible before processing"""
+    if not youtube:
+        return False
+        
+    try:
+        request = youtube.videos().list(
+            part="status",
+            id=video_id
+        )
+        response = request.execute()
+        
+        if not response.get('items'):
+            st.error("Video not found or inaccessible.")
+            return False
+            
+        status = response['items'][0]['status']
+        
+        if status.get('privacyStatus') != 'public':
+            st.error("This video is not public. Please try a public video.")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        st.error(f"Error checking video accessibility: {str(e)}")
+        return False
 def get_video_details(video_id):
     """Get video title and description from YouTube API"""
     if youtube is None:
