@@ -381,7 +381,7 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-2024-11-20gpt-4o-2024-11-20",
+            model="gpt-4o-2024-11-20",
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": content_prompt}
