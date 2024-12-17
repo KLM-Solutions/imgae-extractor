@@ -14,16 +14,44 @@ from PIL import Image
 from io import BytesIO
 import base64
 from datetime import datetime
+import tempfile
+import requests
+import yt_dlp
 
 # Load environment variables
 load_dotenv()
 
-# Set up OpenAI client
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Initialize OpenAI client with better error handling
+def init_openai_client():
+    """Initialize OpenAI client with proper error handling"""
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        if not api_key:
+            raise ValueError("OpenAI API key not found in secrets")
+        return OpenAI(api_key=api_key)
+    except Exception as e:
+        st.error("Error initializing OpenAI client. Please check your API key in Streamlit secrets.")
+        st.error(f"Error details: {str(e)}")
+        return None
 
-# Set up YouTube API client
-YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+# Initialize the OpenAI client
+client = init_openai_client()
+
+# Set up YouTube API client with error handling
+def init_youtube_client():
+    """Initialize YouTube API client with proper error handling"""
+    try:
+        api_key = st.secrets["YOUTUBE_API_KEY"]
+        if not api_key:
+            raise ValueError("YouTube API key not found in secrets")
+        return build('youtube', 'v3', developerKey=api_key)
+    except Exception as e:
+        st.error("Error initializing YouTube client. Please check your API key in Streamlit secrets.")
+        st.error(f"Error details: {str(e)}")
+        return None
+
+# Initialize the YouTube client
+youtube = init_youtube_client()
 
 def extract_video_id(url):
     """Extract YouTube video ID from URL"""
@@ -39,122 +67,185 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-def extract_video_frames(video_id, num_frames=5):
-    """Extract representative frames from the video"""
+def extract_frames_method1(video_url, num_frames=5):
+    """Extract frames using pytube and opencv"""
     try:
-        # Get video URL
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Download video
-        yt = YouTube(video_url)
-        
-        # Get the highest resolution stream
-        video_stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
-        
-        if not video_stream:
-            raise Exception("No suitable video stream available")
-        
-        # Download to temporary file
-        temp_video = f"temp_video_{video_id}_{int(time.time())}.mp4"
-        video_stream.download(filename=temp_video)
-        
-        # Open video file
-        cap = cv2.VideoCapture(temp_video)
-        
-        # Get video properties
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
-        duration = total_frames / fps
-        
-        # Calculate frame intervals
-        interval = total_frames // (num_frames + 1)
-        frames = []
-        
-        for i in range(num_frames):
-            frame_position = interval * (i + 1)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_position)
-            ret, frame = cap.read()
+        # Create a temporary directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Download video
+            yt = YouTube(video_url)
             
-            if ret:
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Convert to PIL Image
-                pil_image = Image.fromarray(frame_rgb)
-                # Resize to reasonable dimensions
-                pil_image.thumbnail((800, 450), Image.Resampling.LANCZOS)
-                # Convert to base64
-                buffered = BytesIO()
-                pil_image.save(buffered, format="JPEG", quality=85)
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                # Store frame with its timestamp
-                timestamp = frame_position / fps
-                frames.append({
-                    'image': img_str,
-                    'timestamp': timestamp,
-                    'time_str': str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
-                })
-        
-        cap.release()
-        os.remove(temp_video)
-        return frames
-    
+            # Get the highest quality stream that includes both video and audio
+            stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+            
+            if not stream:
+                raise Exception("No suitable video stream found")
+            
+            # Download to temporary directory
+            temp_video_path = os.path.join(temp_dir, 'temp_video.mp4')
+            stream.download(output_path=temp_dir, filename='temp_video.mp4')
+            
+            # Open video file
+            cap = cv2.VideoCapture(temp_video_path)
+            
+            # Get video properties
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            duration = total_frames / fps
+            
+            # Calculate frame intervals for even distribution
+            interval = total_frames // (num_frames + 1)
+            frames = []
+            
+            for i in range(num_frames):
+                # Calculate position for evenly distributed frames
+                frame_pos = interval * (i + 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                ret, frame = cap.read()
+                
+                if ret:
+                    # Convert to RGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Create PIL Image
+                    pil_image = Image.fromarray(frame_rgb)
+                    # Resize maintaining aspect ratio
+                    pil_image.thumbnail((800, 450))
+                    
+                    # Convert to base64
+                    buffered = BytesIO()
+                    pil_image.save(buffered, format="JPEG", quality=85)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    
+                    # Convert time to timestamp
+                    timestamp = frame_pos / fps
+                    time_str = str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
+                    
+                    frames.append({
+                        'image': img_str,
+                        'timestamp': timestamp,
+                        'time_str': time_str
+                    })
+            
+            cap.release()
+            return frames
+            
     except Exception as e:
-        st.error(f"Error extracting frames: {str(e)}")
+        st.error(f"Method 1 failed: {str(e)}")
         return None
-    finally:
-        if 'temp_video' in locals() and os.path.exists(temp_video):
-            os.remove(temp_video)
 
-def transcribe_audio(video_id):
-    """Download and transcribe video audio using Whisper"""
+def extract_frames_method2(video_url, num_frames=5):
+    """Extract frames using yt-dlp and opencv"""
     try:
-        # Get video URL
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Configure yt-dlp options
+            ydl_opts = {
+                'format': 'best[ext=mp4]',
+                'outtmpl': os.path.join(temp_dir, 'video.mp4'),
+            }
+            
+            # Download video using yt-dlp
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+                
+            video_path = os.path.join(temp_dir, 'video.mp4')
+            
+            # Process video with OpenCV
+            cap = cv2.VideoCapture(video_path)
+            frames = []
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            
+            interval = total_frames // (num_frames + 1)
+            
+            for i in range(num_frames):
+                frame_pos = interval * (i + 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                ret, frame = cap.read()
+                
+                if ret:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(frame_rgb)
+                    pil_image.thumbnail((800, 450))
+                    
+                    # Convert to base64
+                    buffered = BytesIO()
+                    pil_image.save(buffered, format="JPEG", quality=85)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    
+                    timestamp = frame_pos / fps
+                    time_str = str(datetime.utcfromtimestamp(timestamp).strftime('%M:%S'))
+                    
+                    frames.append({
+                        'image': img_str,
+                        'timestamp': timestamp,
+                        'time_str': time_str
+                    })
+            
+            cap.release()
+            return frames
+            
+    except Exception as e:
+        st.error(f"Method 2 failed: {str(e)}")
+        return None
+def extract_video_thumbnails(video_url):
+    """Extract video thumbnails as fallback"""
+    try:
+        video_id = extract_video_id(video_url)
+        thumbnails = []
         
-        # Configure pytube with custom parameters
-        yt = YouTube(video_url)
+        # Get available thumbnail URLs
+        thumb_urls = [
+            f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg',
+            f'https://img.youtube.com/vi/{video_id}/hqdefault.jpg',
+            f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg'
+        ]
         
-        # Add retry logic for audio download
-        max_retries = 3
-        for attempt in range(max_retries):
+        for url in thumb_urls:
             try:
-                # Get the audio stream with lowest bitrate to speed up download
-                audio_stream = yt.streams.filter(only_audio=True).order_by('abr').first()
-                
-                if not audio_stream:
-                    raise Exception("No audio stream available")
-                
-                # Use a unique temporary filename
-                temp_file = f"temp_audio_{video_id}_{int(time.time())}.mp4"
-                
-                # Download with timeout
-                audio_stream.download(filename=temp_file, timeout=30)
-                
-                # Check if file exists and has size
-                if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
-                    raise Exception("Download failed or empty file")
-                
-                # Load Whisper model and transcribe
-                model = whisper.load_model("base")
-                result = model.transcribe(temp_file)
-                
-                # Clean up
-                os.remove(temp_file)
-                return result["text"]
-                
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                time.sleep(2 ** attempt)  # Exponential backoff
+                response = requests.get(url)
+                if response.status_code == 200:
+                    image = Image.open(BytesIO(response.content))
+                    
+                    # Convert to base64
+                    buffered = BytesIO()
+                    image.save(buffered, format="JPEG", quality=85)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    
+                    thumbnails.append({
+                        'image': img_str,
+                        'timestamp': 0,
+                        'time_str': '00:00'
+                    })
+                    break  # Stop after getting first successful thumbnail
+            except:
                 continue
                 
+        return thumbnails if thumbnails else None
+        
     except Exception as e:
-        st.error(f"Error transcribing audio: {str(e)}")
+        st.error(f"Thumbnail extraction failed: {str(e)}")
         return None
-    finally:
-        # Ensure cleanup even if error occurs
-        if 'temp_file' in locals() and os.path.exists(temp_file):
-            os.remove(temp_file)
+
+def get_video_frames(video_url, num_frames=5):
+    """Try multiple methods to extract frames"""
+    
+    # Try Method 1 (pytube + opencv)
+    frames = extract_frames_method1(video_url, num_frames)
+    if frames:
+        return frames, "Method 1 (pytube)"
+        
+    # Try Method 2 (yt-dlp + opencv)
+    frames = extract_frames_method2(video_url, num_frames)
+    if frames:
+        return frames, "Method 2 (yt-dlp)"
+        
+    # Fallback to thumbnails
+    frames = extract_video_thumbnails(video_url)
+    if frames:
+        return frames, "Thumbnails"
+    
+    return None, "Failed"
 
 def get_video_transcript(video_id):
     """Get transcript from YouTube video with fallback to audio transcription"""
@@ -188,8 +279,64 @@ def get_video_transcript(video_id):
             """)
         return transcript
 
+def transcribe_audio(video_id):
+    """Download and transcribe video audio using Whisper"""
+    try:
+        # Get video URL
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Configure pytube with custom parameters
+        yt = YouTube(video_url)
+        
+        # Add retry logic for audio download
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Get the audio stream with lowest bitrate to speed up download
+                audio_stream = yt.streams.filter(only_audio=True).order_by('abr').first()
+                
+                if not audio_stream:
+                    raise Exception("No audio stream available")
+                
+                # Use a unique temporary filename
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                    
+                # Download with timeout
+                audio_stream.download(filename=temp_path, timeout=30)
+                
+                # Check if file exists and has size
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise Exception("Download failed or empty file")
+                
+                # Load Whisper model and transcribe
+                model = whisper.load_model("base")
+                result = model.transcribe(temp_path)
+                
+                # Clean up
+                os.unlink(temp_path)
+                return result["text"]
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+                
+    except Exception as e:
+        st.error(f"Error transcribing audio: {str(e)}")
+        return None
+    finally:
+        # Ensure cleanup even if error occurs
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
 def get_video_details(video_id):
     """Get video title and description from YouTube API"""
+    if youtube is None:
+        st.error("YouTube API client not initialized")
+        return None
+        
     try:
         request = youtube.videos().list(
             part="snippet",
@@ -222,7 +369,7 @@ You are converting the video transcript into a detailed blog post in the speaker
 9. Include relevant examples and case studies mentioned.
 10. End with comprehensive concluding thoughts.
 11. Keep the speaker's authentic voice throughout.
-12. Elaborate on technical concepts when present.
+12. Reference images using [IMAGE_X] tags where appropriate, describing what each image shows.
 """
 
 SYSTEM_INSTRUCTION_CONCISE = """
@@ -238,12 +385,15 @@ You are converting the video transcript into a concise blog post in the speaker'
 9. Include only the most impactful examples.
 10. End with brief, actionable takeaways.
 11. Keep the speaker's authentic voice throughout.
-12. Simplify technical concepts while maintaining accuracy.
+12. Reference images using [IMAGE_X] tags where appropriate, describing what each image shows.
 """
 
 def generate_article_from_transcript(title, transcript, video_details=None, style="detailed", frames=None):
     """Generate a blog post with images from the transcript and video details"""
-    
+    if client is None:
+        st.error("OpenAI client not initialized. Cannot generate article.")
+        return None
+        
     # Select appropriate system instruction based on style
     system_instruction = SYSTEM_INSTRUCTION_DETAILED if style == "detailed" else SYSTEM_INSTRUCTION_CONCISE
     
@@ -258,62 +408,49 @@ def generate_article_from_transcript(title, transcript, video_details=None, styl
     # Add frame information to the prompt if available
     frame_context = ""
     if frames:
-        frame_times = [f"Frame at {frame['time_str']}" for frame in frames]
-        frame_context = f"\nKey video frames available at: {', '.join(frame_times)}"
+        frame_times = [f"Frame {i+1} at {frame['time_str']}" for i, frame in enumerate(frames)]
+        frame_context = f"\nAvailable video frames: {', '.join(frame_times)}"
     
-    summary_prompt = f"""First, summarize the key points from this transcript and context:
-    {context}
-    {frame_context}
-    Transcript excerpt: {transcript[:1500]}..."""
-    
-    # Get a summary first to help with context
-    summary_response = client.chat.completions.create(
-        model="gpt-4o-2024-11-20",
-        messages=[
-            {"role": "system", "content": "Summarize the key points from this video transcript and context."},
-            {"role": "user", "content": summary_prompt}
-        ],
-        temperature=0.7
-    )
-    summary = summary_response.choices[0].message.content
-    
-    # Now generate the full article with image placement suggestions
+    # Generate blog content
     content_prompt = f"""Write a {'detailed' if style == 'detailed' else 'concise'} blog post with the title: '{title}'
     
     Context: {context}
     {frame_context}
-    
-    Summary of content: {summary}
     
     Full transcript: {transcript}
     
     Convert this into a well-structured blog post while maintaining the speaker's voice and key insights.
     Make it {'comprehensive and detailed' if style == 'detailed' else 'concise and focused'}.
     
-    If frame timestamps are provided, suggest appropriate places to insert images using the tag [IMAGE_FRAME_X] 
+    If there are video frames available, suggest good places to insert them using [IMAGE_X] tags,
     where X is the frame number (1 to {len(frames) if frames else 0}).
     
     Use proper markdown formatting and create an engaging article."""
     
-    response = client.chat.completions.create(
-        model="gpt-4o-2024-11-20",
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": content_prompt}
-        ],
-        temperature=0.7
-    )
-    
-    article_content = response.choices[0].message.content
-    
-    # If we have frames, replace the image tags with actual images
-    if frames:
-        for i, frame in enumerate(frames, 1):
-            img_tag = f'[IMAGE_FRAME_{i}]'
-            img_html = f'<img src="data:image/jpeg;base64,{frame["image"]}" alt="Frame at {frame["time_str"]}" style="max-width: 100%; height: auto; margin: 20px 0;">'
-            article_content = article_content.replace(img_tag, img_html)
-    
-    return article_content
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-2024-11-20",
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": content_prompt}
+            ],
+            temperature=0.1
+        )
+        
+        article_content = response.choices[0].message.content
+        
+        # If we have frames, replace the image tags with actual images
+        if frames:
+            for i, frame in enumerate(frames, 1):
+                img_tag = f'[IMAGE_{i}]'
+                img_html = f'<img src="data:image/jpeg;base64,{frame["image"]}" alt="Frame at {frame["time_str"]}" style="max-width: 100%; height: auto; margin: 20px 0;">'
+                article_content = article_content.replace(img_tag, img_html)
+        
+        return article_content
+        
+    except Exception as e:
+        st.error(f"Error generating article: {str(e)}")
+        return None
 
 def main():
     st.set_page_config(page_title="YouTube to Blog Post Generator", page_icon="📝", layout="wide")
@@ -340,6 +477,14 @@ def main():
             format_func=lambda x: "Detailed (Comprehensive)" if x == "detailed" else "Concise (To the point)",
             help="Choose between a detailed or concise writing style"
         )
+        
+        num_frames = st.slider(
+            "Number of images to extract",
+            min_value=1,
+            max_value=10,
+            value=5,
+            help="Select how many images to extract from the video"
+        )
     
     if st.button("Generate Article", type="primary"):
         if video_url and title:
@@ -355,14 +500,18 @@ def main():
                 
                 # Extract frames
                 with st.spinner("Extracting video frames..."):
-                    frames = extract_video_frames(video_id)
+                    frames, extraction_method = get_video_frames(video_url, num_frames)
+                    if frames:
+                        st.success(f"Successfully extracted frames using {extraction_method}")
+                    else:
+                        st.warning("Could not extract video frames. Generating article without images.")
                 
                 # Get transcript
                 transcript = get_video_transcript(video_id)
                 if not transcript:
                     return
                 
-                # Generate article with selected style and frames
+                # Generate article
                 article_content = generate_article_from_transcript(
                     title, 
                     transcript, 
@@ -370,22 +519,23 @@ def main():
                     style,
                     frames
                 )
-            
-            # Display results
-            st.success("✅ Article generated successfully!")
-            
-            # Show the article in a nice format
-            st.markdown("---")
-            st.markdown(f"## Generated Article ({style.capitalize()} Version)")
-            st.markdown(article_content, unsafe_allow_html=True)
-            
-            # Add download button
-            st.download_button(
-                label="Download Article as Markdown",
-                data=article_content,
-                file_name=f"generated_article_{style}.md",
-                mime="text/markdown"
-            )
+                
+                if article_content:
+                    # Display results
+                    st.success("✅ Article generated successfully!")
+                    
+                    # Show the article in a nice format
+                    st.markdown("---")
+                    st.markdown(f"## Generated Article ({style.capitalize()} Version)")
+                    st.markdown(article_content, unsafe_allow_html=True)
+                    
+                    # Add download button
+                    st.download_button(
+                        label="Download Article as Markdown",
+                        data=article_content,
+                        file_name=f"generated_article_{style}.md",
+                        mime="text/markdown"
+                    )
         else:
             st.warning("Please enter both a YouTube URL and a title.")
     
@@ -398,8 +548,9 @@ def main():
     3. Select your preferred writing style:
         - **Detailed**: Comprehensive coverage with examples and elaboration
         - **Concise**: Brief, focused version with key points only
-    4. Click "Generate Article" and wait for processing
-    5. Download the generated article in Markdown format
+    4. Choose the number of images to extract from the video
+    5. Click "Generate Article" and wait for processing
+    6. Download the generated article in Markdown format
     
     Note: Processing time may vary depending on video length and transcript availability.
     """)
